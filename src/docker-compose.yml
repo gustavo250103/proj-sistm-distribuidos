@@ -1,0 +1,61 @@
+services:
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
+    container_name: broker
+    volumes:
+      - ./broker:/app
+    ports:
+      - 5555:5555
+      - 5556:5556
+
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
+    container_name: proxy
+    volumes:
+      - ./proxy:/app
+    ports:
+      - 5557:5557
+      - 5558:5558
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
+    volumes:
+      - ./server:/app
+    depends_on:
+      - broker
+      - proxy
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
+    stdin_open: true
+    tty: true
+    depends_on:
+      - server
+    volumes:
+      - ./client:/app
+    deploy:
+      replicas: 2
+
+  listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
+    volumes:
+      - ./listener:/app
+    depends_on:
+      - proxy
+
+
