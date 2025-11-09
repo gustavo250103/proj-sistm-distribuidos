@@ -37,35 +37,6 @@ Com o avanço das partes, foram adicionadas camadas de:
 
 ---
 
-## 🧱 Arquitetura do Sistema
-
-A arquitetura é composta por múltiplos serviços que se comunicam através de sockets ZeroMQ.
-
-```mermaid
-graph LR
-    ref <--req/rep--> server_1
-    ref <--req/rep--> server_2
-    ref <--req/rep--> server_3
-
-    server_1 <--req/rep--> broker
-    server_2 <--req/rep--> broker
-    server_3 <--req/rep--> broker
-
-    server_1 --pub--> proxy
-    server_2 --pub--> proxy
-    server_3 --pub--> proxy
-
-    broker <--req/rep--> client
-    broker <--req/rep--> bot_1
-    broker <--req/rep--> bot_2
-
-    proxy --sub--> client
-    proxy --sub--> bot_1
-    proxy --sub--> bot_2
-```
-
----
-
 ## ⚙️ Componentes Principais
 
 | Serviço | Linguagem | Função |
