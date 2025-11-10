@@ -10,7 +10,7 @@ import threading
 # Endereços principais (podem ser sobrescritos via docker-compose/env)
 BROKER = os.getenv("BROKER_ENDPOINT", "tcp://localhost:5556")     # REP <-> DEALER (broker)
 XSUB   = os.getenv("PROXY_XSUB", "tcp://localhost:5557")          # PUB -> XSUB (proxy)
-XPUB   = os.getenv("PROXY_XPUB", "tcp://localhost:5558")          # SUB <- XPUB (proxy)  # <- usado p/ replicação
+XPUB   = os.getenv("PROXY_XPUB", "tcp://localhost:5558")          # SUB <- XPUB (proxy)  # <- usado p/ replicação e election
 
 DATA   = os.getenv("PERSIST_DIR", "./data")
 
@@ -31,13 +31,13 @@ os.makedirs(DATA, exist_ok=True)
 
 logical_clock = 0            # relógio lógico Lamport
 msg_count = 0
-SYNC_EVERY = 10
+SYNC_EVERY = 10              # a cada N mensagens tentamos sincronizar clock e atualizar coordenador
 last_heartbeat = 0.0
 HEARTBEAT_INTERVAL = 5.0
 
 rank = None
-servers_info = {}
-coordinator = None
+servers_info = {}            # info retornada pelo ref
+coordinator = None           # nome do servidor coordenador
 
 
 def ts() -> str:
@@ -135,7 +135,7 @@ def register_with_ref(ref_sock) -> None:
     if servers_info:
         coordinator_name = min(servers_info.items(), key=lambda kv: kv[1]["rank"])[0]
         coordinator = coordinator_name
-        print(f"[{SERVER_NAME}] coordenador atual: {coordinator}")
+        print(f"[{SERVER_NAME}] coordenador inicial: {coordinator}")
 
 
 def maybe_send_heartbeat(ref_sock) -> None:
@@ -145,20 +145,54 @@ def maybe_send_heartbeat(ref_sock) -> None:
     if now - last_heartbeat >= HEARTBEAT_INTERVAL:
         ref_request(ref_sock, "heartbeat", {"user": SERVER_NAME})
         last_heartbeat = now
-        # print(f"[{SERVER_NAME}] heartbeat enviado")
 
 
-def maybe_sync_clock_with_coordinator() -> None:
+def sync_clock_with_ref(ref_sock) -> None:
     """
-    Gancho para algoritmo de Berkeley.
-    Aqui apenas mostramos que a função foi chamada.
+    Sincroniza o relógio lógico com o servidor de referência.
+    Usa o serviço 'clock' do ref (algoritmo de Berkeley simplificado),
+    que devolve o horário base. O update do clock lógico já é feito
+    em ref_request, aqui apenas exibimos o ajuste.
     """
-    if coordinator:
-        print(f"[{SERVER_NAME}] (gancho) sincronização de clock com coordenador: {coordinator}")
+    reply = ref_request(ref_sock, "clock", {})
+    data = reply.get("data", {}) or {}
+    remote_time = data.get("time")
+    print(f"[{SERVER_NAME}] sincronizou clock com ref (time={remote_time}, clock={logical_clock})")
+
+
+def refresh_servers_and_maybe_elect(ref_sock, pub_sock) -> None:
+    """
+    Atualiza lista de servidores a partir do ref e, se houver mudança,
+    elege novo coordenador (menor rank) e publica no tópico 'servers'.
+    """
+    global servers_info, coordinator
+
+    reply_list = ref_request(ref_sock, "list", {})
+    new_info = reply_list.get("data", {}).get("list", {}) or {}
+    if not new_info:
+        return
+
+    servers_info = new_info
+    new_coord = min(servers_info.items(), key=lambda kv: kv[1]["rank"])[0]
+
+    if new_coord != coordinator:
+        coordinator = new_coord
+        print(f"[{SERVER_NAME}] novo coordenador eleito: {coordinator}")
+
+        # avisa os demais via publicação no tópico 'servers'
+        payload = {
+            "service": "election",
+            "data": {
+                "coordinator": coordinator,
+                "timestamp": ts(),
+                "clock": next_clock(),
+            },
+        }
+        pub_msgpack(pub_sock, "servers", payload)
 
 
 # ---------------------------
-# THREAD de replicação (Parte 5)
+# THREAD de replicação 
 # ---------------------------
 
 def replica_listener():
@@ -212,7 +246,7 @@ def main():
     rep = ctx.socket(zmq.REP)
     rep.connect(BROKER)
 
-    # PUB: publica mensagens para canais/usuários e também para réplicas
+    # PUB: publica mensagens para canais/usuários, réplicas e eleição
     pub = ctx.socket(zmq.PUB)
     pub.connect(XSUB)
 
@@ -271,7 +305,7 @@ def main():
             pub_msgpack(pub, channel, payload)
             # grava localmente
             append(LOG_PUB, payload)
-            # 🔁 publica no tópico 'replica' para outros servidores
+            # 🔁 replica para outros servidores
             pub_msgpack(pub, "replica", payload)
 
             reply_clock = next_clock()
@@ -365,6 +399,8 @@ def main():
             })
 
         elif service == "clock":
+            # este serviço é chamado por outros processos, mas aqui
+            # mantemos para compatibilidade com o enunciado
             reply_clock = next_clock()
             send_msgpack(rep, {
                 "service": "clock",
@@ -376,6 +412,7 @@ def main():
             })
 
         elif service == "election":
+            # responde requisições de eleição conforme enunciado
             reply_clock = next_clock()
             send_msgpack(rep, {
                 "service": "election",
@@ -398,9 +435,11 @@ def main():
                 },
             })
 
-        # gancho p/ sincronização de relógio físico a cada N mensagens
+        # a cada N mensagens: sincroniza relógio com o ref
+        # e atualiza coordenador (eleição baseada no rank)
         if msg_count > 0 and msg_count % SYNC_EVERY == 0:
-            maybe_sync_clock_with_coordinator()
+            sync_clock_with_ref(ref)
+            refresh_servers_and_maybe_elect(ref, pub)
 
         # heartbeat pro servidor de referência
         maybe_send_heartbeat(ref)

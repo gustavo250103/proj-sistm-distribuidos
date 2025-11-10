@@ -1,57 +1,131 @@
-import zmq, json, os, time
+import os
+import json
 from datetime import datetime
 
-PORT = os.getenv("REF_PORT", "6000")             # porta do servidor de referência
-ADDR = f"tcp://*:{PORT}"                         # endereço de bind
-DATA = os.getenv("REF_DATA", "./data/ref.json")  # onde guarda a lista de servidores
+import zmq
 
-servers = {}  # {nome: {"rank": n, "last_beat": timestamp}}
-next_rank = 1
-clock = 0     # relógio lógico local
+DATA = os.getenv("PERSIST_DIR", "./data")
+os.makedirs(DATA, exist_ok=True)
 
-def ts(): return datetime.utcnow().isoformat() + "Z"
+SERVERS_FILE = os.path.join(DATA, "ref_servers.json")
 
-def update_clock(remote_clock):
-    """atualiza o relógio lógico local"""
-    global clock
-    clock = max(clock, remote_clock) + 1
+logical_clock = 0
 
-def save():
-    json.dump(servers, open(DATA, "w"), indent=2)
+
+def ts() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def load_servers():
+    if os.path.exists(SERVERS_FILE):
+        return json.load(open(SERVERS_FILE, "r", encoding="utf-8"))
+    return {}
+
+
+def save_servers(servers):
+    json.dump(servers, open(SERVERS_FILE, "w", encoding="utf-8"))
+
+
+def update_clock(remote_clock: int):
+    global logical_clock
+    logical_clock = max(logical_clock, int(remote_clock or 0)) + 1
+
+
+def next_clock() -> int:
+    global logical_clock
+    logical_clock += 1
+    return logical_clock
+
 
 def main():
-    global next_rank, clock
-    ctx = zmq.Context()
+    ctx = zmq.Context.instance()
     rep = ctx.socket(zmq.REP)
-    rep.bind(ADDR)
-    print(f"[ref] listening on {ADDR}")
+    rep.bind("tcp://*:6000")
+
+    servers = load_servers()
+
+    print("[ref] servidor de referência iniciado em tcp://*:6000")
 
     while True:
         msg = rep.recv_json()
-        data = msg.get("data", {})
-        svc = msg.get("service")
-        remote_clock = data.get("clock", 0)
-        update_clock(remote_clock)
+        service = msg.get("service")
+        data = msg.get("data", {}) or {}
 
-        if svc == "rank":
+        update_clock(data.get("clock", 0))
+
+        if service == "rank":
+            # registra servidor se ainda não existir, com próximo rank
             name = data.get("user")
-            if name not in servers:
-                servers[name] = {"rank": next_rank, "last_beat": time.time()}
-                next_rank += 1
-                save()
-            rep.send_json({"service": "rank", "data": {"rank": servers[name]["rank"], "timestamp": ts(), "clock": clock}})
+            if name and name not in servers:
+                rank = len(servers) + 1
+                servers[name] = {
+                    "rank": rank,
+                    "last_beat": ts(),
+                }
+                save_servers(servers)
 
-        elif svc == "list":
-            rep.send_json({"service": "list", "data": {"list": servers, "timestamp": ts(), "clock": clock}})
+            reply = {
+                "service": "rank",
+                "data": {
+                    "rank": servers.get(name, {}).get("rank"),
+                    "timestamp": ts(),
+                    "clock": next_clock(),
+                },
+            }
+            rep.send_json(reply)
 
-        elif svc == "heartbeat":
+        elif service == "list":
+            # devolve lista de servidores e ranks
+            reply = {
+                "service": "list",
+                "data": {
+                    "list": servers,
+                    "timestamp": ts(),
+                    "clock": next_clock(),
+                },
+            }
+            rep.send_json(reply)
+
+        elif service == "heartbeat":
+            # atualiza last_beat do servidor
             name = data.get("user")
             if name in servers:
-                servers[name]["last_beat"] = time.time()
-            rep.send_json({"service": "heartbeat", "data": {"timestamp": ts(), "clock": clock}})
+                servers[name]["last_beat"] = ts()
+                save_servers(servers)
+
+            reply = {
+                "service": "heartbeat",
+                "data": {
+                    "timestamp": ts(),
+                    "clock": next_clock(),
+                },
+            }
+            rep.send_json(reply)
+
+        elif service == "clock":
+            # usado para sincronização de relógio (Berkeley simpli.)
+            reply = {
+                "service": "clock",
+                "data": {
+                    "time": ts(),
+                    "timestamp": ts(),
+                    "clock": next_clock(),
+                },
+            }
+            rep.send_json(reply)
 
         else:
-            rep.send_json({"service": svc, "data": {"status": "erro", "msg": "serviço desconhecido", "clock": clock}})
+            reply = {
+                "service": service,
+                "data": {
+                    "status": "erro",
+                    "message": "serviço desconhecido",
+                    "timestamp": ts(),
+                    "clock": next_clock(),
+                },
+            }
+            rep.send_json(reply)
+
 
 if __name__ == "__main__":
     main()
