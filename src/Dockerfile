@@ -1,14 +1,16 @@
-# imagem oficial do Python com Alpine (leve)
+# Imagem oficial do Python (leve)
 FROM python:3.13.7-alpine3.21
 
-# diretório de trabalho dentro do container
+# Diretório de trabalho dentro do container
 WORKDIR /app
 
-# copia todo o projeto para dentro da imagem
+# Copia todo o projeto
 COPY . .
 
-# instala as libs usadas pelo Python (ZeroMQ + MessagePack)
-RUN pip install pyzmq msgpack
+# Instala libs usadas pelo código Python
+RUN pip install --no-cache-dir pyzmq msgpack
 
-# comando padrão (o docker-compose sobrescreve conforme o serviço)
-CMD ["python", "main.py"]
+# Comando padrão só de placeholder.
+# Cada serviço (server, client, ref) define o seu próprio "command" no docker-compose.
+CMD ["python", "-c", "print('Imagem base para serviços Python (server/client/ref)')"]
+

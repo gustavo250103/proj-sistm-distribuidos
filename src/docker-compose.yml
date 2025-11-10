@@ -1,49 +1,35 @@
-version: "3.9"
-
 services:
-  # ---------- Servidor de referência ----------
   ref:
     build: .
-    command: python src/ref/main.py
-    ports:
-      - "6000:6000"
+    command: python ref/main.py
+    container_name: ref
     environment:
       - PERSIST_DIR=/app/data
     volumes:
       - ref_data:/app/data
 
-  # ---------- Broker (JavaScript / Node.js) ----------
   broker:
-    build: .
-    command: node src/broker/main.js
-    environment:
-      - ROUTER_ADDR=tcp://*:5555
-      - DEALER_ADDR=tcp://*:5556
-    depends_on:
-      - proxy
+    build:
+      context: .
+      dockerfile: broker/Dockerfile   # usa o Dockerfile do broker JS
+    container_name: broker
 
-  # ---------- Proxy (Go) ----------
   proxy:
-    build: .
-    command: go run ./src/proxy_go/main.go
-    environment:
-      - XSUB_ADDR=tcp://*:5557
-      - XPUB_ADDR=tcp://*:5558
-    depends_on:
-      - ref
+    build:
+      context: .
+      dockerfile: proxy_go/Dockerfile # usa o Dockerfile do proxy Go
+    container_name: proxy
 
-  # ---------- Servidor (Python) ----------
   server:
     build: .
-    command: python src/server/main.py
+    command: python server/main.py
     environment:
       - BROKER_ENDPOINT=tcp://broker:5556
       - PROXY_XSUB=tcp://proxy:5557
-      - PROXY_XPUB=tcp://proxy:5558        # 🔹 necessário para ouvir o tópico 'replica'
+      - PROXY_XPUB=tcp://proxy:5558
       - REF_HOST=ref
       - REF_PORT=6000
       - PERSIST_DIR=/app/data
-      - SERVER_NAME=server
     volumes:
       - server_data:/app/data
     depends_on:
@@ -51,12 +37,11 @@ services:
       - proxy
       - ref
     deploy:
-      replicas: 3                           # 🔹 3 réplicas de servidores (parte 5)
+      replicas: 3
 
-  # ---------- Cliente automático ----------
   client_auto:
     build: .
-    command: python src/client/main.py
+    command: python client/main.py
     environment:
       - AUTO_CLIENT=1
       - BROKER_REQ=tcp://broker:5555
