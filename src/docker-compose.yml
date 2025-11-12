@@ -1,58 +1,59 @@
 services:
-  ref:
-    build: .
-    command: python ref/main.py
-    container_name: ref
-    environment:
-      - PERSIST_DIR=/app/data
-    volumes:
-      - ref_data:/app/data
-
   broker:
     build:
       context: .
-      dockerfile: broker/Dockerfile   # usa o Dockerfile do broker JS
+      dockerfile: Dockerfile
+    image: cc7261:proj
     container_name: broker
+    volumes:
+      - ./broker:/app
+    ports:
+      - 5555:5555
+      - 5556:5556
 
   proxy:
     build:
       context: .
-      dockerfile: proxy_go/Dockerfile # usa o Dockerfile do proxy Go
+      dockerfile: Dockerfile
+    image: cc7261:proj
     container_name: proxy
+    volumes:
+      - ./proxy:/app
+    ports:
+      - 5557:5557
+      - 5558:5558
 
   server:
-    build: .
-    command: python server/main.py
-    environment:
-      - BROKER_ENDPOINT=tcp://broker:5556
-      - PROXY_XSUB=tcp://proxy:5557
-      - PROXY_XPUB=tcp://proxy:5558
-      - REF_HOST=ref
-      - REF_PORT=6000
-      - PERSIST_DIR=/app/data
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
     volumes:
-      - server_data:/app/data
+      - ./server:/app
     depends_on:
       - broker
       - proxy
-      - ref
-    deploy:
-      replicas: 3
 
-  client_auto:
-    build: .
-    command: python client/main.py
-    environment:
-      - AUTO_CLIENT=1
-      - BROKER_REQ=tcp://broker:5555
-      - PROXY_XPUB=tcp://proxy:5558
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
+    stdin_open: true
+    tty: true
     depends_on:
-      - broker
-      - proxy
       - server
+    volumes:
+      - ./client:/app
     deploy:
       replicas: 2
 
-volumes:
-  server_data:
-  ref_data:
+  listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc7261:proj
+    volumes:
+      - ./listener:/app
+    depends_on:
+      - proxy
