@@ -1,165 +1,182 @@
-import zmq
+import os
 import json
 import time
-import os
+import zmq
+import msgpack
 
 # Arquivos para persistência
-USERS_FILE = 'data/users.json'
-CHANNELS_FILE = 'data/channels.json'
+DATA_DIR = "data"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+CHANNELS_FILE = os.path.join(DATA_DIR, "channels.json")
+MESSAGES_FILE = os.path.join(DATA_DIR, "messages.log")
 
-# --- Funções de Persistência ---
+
+# ---------------------------
+# Persistência básica
+# ---------------------------
+
+def ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
 
 def load_data(filepath):
-    """Carrega dados de um arquivo JSON."""
-    # Garante que o diretório 'data' exista
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    
+    ensure_data_dir()
     if not os.path.exists(filepath):
         return []
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             return json.load(f)
     except json.JSONDecodeError:
         return []
 
-def save_data(filepath, data):
-    """Salva dados em um arquivo JSON, garantindo unicidade."""
-    # Garante que o diretório 'data' exista
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    
-    unique_data = sorted(list(set(data)))
-    with open(filepath, 'w') as f:
-        json.dump(unique_data, f, indent=4)
 
-# --- Carregar dados na inicialização ---
+def save_data(filepath, data):
+    ensure_data_dir()
+    unique_data = sorted(list(set(data)))
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(unique_data, f, indent=2, ensure_ascii=False)
+
+
+def log_message(message_data):
+    ensure_data_dir()
+    with open(MESSAGES_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(message_data, ensure_ascii=False) + "\n")
+
+
+# ---------------------------
+# Helpers MessagePack
+# ---------------------------
+
+def recv_msgpack(sock):
+    raw = sock.recv()
+    return msgpack.unpackb(raw, raw=False)
+
+
+def send_msgpack(sock, obj):
+    sock.send(msgpack.packb(obj, use_bin_type=True))
+
+
+def pub_msgpack(sock, topic, obj):
+    sock.send_multipart([
+        topic.encode("utf-8"),
+        msgpack.packb(obj, use_bin_type=True),
+    ])
+
+
+# ---------------------------
+# Estado inicial
+# ---------------------------
+
 users = load_data(USERS_FILE)
 channels = load_data(CHANNELS_FILE)
 print(f"Servidor iniciado. {len(users)} usuários, {len(channels)} canais carregados.")
 
-# --- Configuração ZMQ ---
 context = zmq.Context()
 
-# Socket REP para responder aos clientes (via broker)
 rep_socket = context.socket(zmq.REP)
 rep_socket.connect("tcp://broker:5556")
 
-# Socket PUB para publicar (será usado na Etapa 2)
 pub_socket = context.socket(zmq.PUB)
 pub_socket.connect("tcp://proxy:5557")
 
 print("Servidor pronto para receber requisições...")
 
-# --- Loop Principal de Requisições ---
+
+# ---------------------------
+# Loop principal
+# ---------------------------
+
 while True:
     try:
-        # 1. Recebe a requisição (espera-se JSON)
-        message = rep_socket.recv_json()
-        print(f"Recebido: {message}")
-
-        service = message.get('service')
-        data = message.get('data', {})
+        message = recv_msgpack(rep_socket)
+        service = message.get("service")
+        data = message.get("data", {}) or {}
         response = {}
+        current_time = int(time.time())
 
-        # 2. Roteia a requisição para o serviço correto
-        
-        if service == 'login':
-            user = data.get('user')
+        if service == "login":
+            user = data.get("user")
             if user:
                 if user not in users:
                     users.append(user)
-                    save_data(USERS_FILE, users) # Persiste
-                
-                response = {
-                    "service": "login",
-                    "data": {
-                        "status": "sucesso",
-                        "timestamp": int(time.time())
-                    }
-                }
+                    save_data(USERS_FILE, users)
+                response = {"status": "sucesso"}
             else:
-                response = {
-                    "service": "login",
-                    "data": {
-                        "status": "erro",
-                        "description": "Nome de usuário não fornecido",
-                        "timestamp": int(time.time())
-                    }
-                }
+                response = {"status": "erro", "description": "Nome de usuário não fornecido"}
 
-        elif service == 'users':
-            response = {
-                "service": "users",
-                "data": {
-                    "users": users,
-                    "timestamp": int(time.time())
-                }
-            }
+        elif service == "users":
+            response = {"users": users}
 
-        elif service == 'channel':
-            channel = data.get('channel')
+        elif service == "channel":
+            channel = data.get("channel")
             if channel:
                 if channel not in channels:
                     channels.append(channel)
-                    save_data(CHANNELS_FILE, channels) # Persiste
-                    status = "sucesso"
-                    desc = ""
+                    save_data(CHANNELS_FILE, channels)
+                    response = {"status": "sucesso"}
                 else:
-                    status = "erro"
-                    desc = "Canal já existe"
-                
-                response = {
-                    "service": "channel",
-                    "data": {
-                        "status": status,
-                        "description": desc,
-                        "timestamp": int(time.time())
-                    }
-                }
+                    response = {"status": "erro", "description": "Canal já existe"}
             else:
-                 response = {
-                    "service": "channel",
-                    "data": {
-                        "status": "erro",
-                        "description": "Nome de canal não fornecido",
-                        "timestamp": int(time.time())
-                    }
-                }
+                response = {"status": "erro", "description": "Nome de canal não fornecido"}
 
-        elif service == 'channels':
-            response = {
-                "service": "channels",
-                "data": {
-                    # Seguindo a especificação (usando a chave "users" para a lista de canais)
-                    "users": channels, 
-                    "timestamp": int(time.time())
+        elif service == "channels":
+            response = {"users": channels}  # mantém compatibilidade da Etapa 1
+
+        elif service == "publish":
+            user = data.get("user")
+            channel = data.get("channel")
+            message_content = data.get("message")
+            if channel in channels:
+                pub_message = {
+                    "type": "channel",
+                    "channel": channel,
+                    "user": user,
+                    "message": message_content,
+                    "timestamp": current_time,
                 }
-            }
+                pub_msgpack(pub_socket, channel, pub_message)
+                log_message(pub_message)
+                response = {"status": "OK"}
+            else:
+                response = {"status": "erro", "message": "Canal não existe"}
+
+        elif service == "message":
+            src_user = data.get("src")
+            dst_user = data.get("dst")
+            message_content = data.get("message")
+            if dst_user in users:
+                pub_message = {
+                    "type": "private",
+                    "from": src_user,
+                    "to": dst_user,
+                    "message": message_content,
+                    "timestamp": current_time,
+                }
+                pub_msgpack(pub_socket, dst_user, pub_message)
+                log_message(pub_message)
+                response = {"status": "OK"}
+            else:
+                response = {"status": "erro", "message": "Usuário não existe"}
 
         else:
-            response = {
-                "service": "unknown",
-                "data": {
-                    "status": "erro",
-                    "description": "Serviço desconhecido",
-                    "timestamp": int(time.time())
-                }
-            }
+            response = {"status": "erro", "description": "Serviço desconhecido"}
 
-        # 3. Envia a resposta JSON
-        rep_socket.send_json(response)
-        print(f"Enviado: {response}")
+        final_response = {
+            "service": service,
+            "data": {**response, "timestamp": current_time},
+        }
+        send_msgpack(rep_socket, final_response)
 
     except Exception as e:
         print(f"Erro ao processar: {e}")
-        # Tenta enviar uma resposta de erro se possível
         try:
-            rep_socket.send_json({
+            send_msgpack(rep_socket, {
                 "service": "internal_error",
                 "data": {
                     "status": "erro",
                     "description": str(e),
-                    "timestamp": int(time.time())
-                }
+                    "timestamp": int(time.time()),
+                },
             })
         except zmq.ZMQError as ze:
             print(f"Erro ZMQ ao enviar erro: {ze}")
