@@ -1,0 +1,13 @@
+{
+  "name": "distributed-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automated ZeroMQ bot client for the distributed messaging system",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "zeromq": "^6.0.0"
+  }
+}

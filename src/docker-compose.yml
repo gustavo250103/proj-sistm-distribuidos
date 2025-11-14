@@ -1,58 +1,66 @@
 services:
-  ref:
-    build: .
-    command: python ref/main.py
-    container_name: ref
-    environment:
-      - PERSIST_DIR=/app/data
-    volumes:
-      - ref_data:/app/data
-
   broker:
     build:
       context: .
-      dockerfile: broker/Dockerfile   # usa o Dockerfile do broker JS
+      dockerfile: Dockerfile
     container_name: broker
+    volumes:
+      - ./broker:/app
+    ports:
+      - 5555:5555
+      - 5556:5556
 
   proxy:
     build:
       context: .
-      dockerfile: proxy_go/Dockerfile # usa o Dockerfile do proxy Go
+      dockerfile: Dockerfile
     container_name: proxy
+    volumes:
+      - ./proxy:/app
+    ports:
+      - 5557:5557
+      - 5558:5558
 
   server:
-    build: .
-    command: python server/main.py
-    environment:
-      - BROKER_ENDPOINT=tcp://broker:5556
-      - PROXY_XSUB=tcp://proxy:5557
-      - PROXY_XPUB=tcp://proxy:5558
-      - REF_HOST=ref
-      - REF_PORT=6000
-      - PERSIST_DIR=/app/data
+    build:
+      context: .
+      dockerfile: Dockerfile
     volumes:
-      - server_data:/app/data
+      - ./server:/app
+      - ./data:/app/data # Monta o volume de dados para persistência
     depends_on:
       - broker
       - proxy
-      - ref
-    deploy:
-      replicas: 3
 
-  client_auto:
-    build: .
-    command: python client/main.py
-    environment:
-      - AUTO_CLIENT=1
-      - BROKER_REQ=tcp://broker:5555
-      - PROXY_XPUB=tcp://proxy:5558
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    stdin_open: true
+    tty: true
     depends_on:
-      - broker
+      - server
+    volumes:
+      - ./client:/app
+    # Removido 'deploy: replicas: 2' para cliente interativo
+    # (Apenas um cliente interativo por terminal)
+
+  listener: # Este serviço parece não estar sendo usado, mas o mantemos
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    volumes:
+      - ./listener:/app
+    depends_on:
       - proxy
+
+  # --- NOVO SERVIÇO ---
+  bot:
+    build:
+      context: ./bot # Contexto da pasta do bot
+      dockerfile: Dockerfile # Dockerfile do bot
+    depends_on:
       - server
     deploy:
-      replicas: 2
-
-volumes:
-  server_data:
-  ref_data:
+      replicas: 2 # Executa 2 instâncias do bot

@@ -1,126 +1,171 @@
-import os
-import random
+import zmq
+import json
 import time
+import threading
+import sys
 from datetime import datetime
 
-import zmq
-import msgpack
+# Endereços
+req_address = "broker"
+req_port = 5555
+sub_address = "proxy"
+sub_port = 5558
 
-# Endereços (podem ser sobrescritos por variáveis de ambiente)
-BROKER = os.getenv("BROKER_REQ", "tcp://localhost:5555")   # broker (ROUTER)
-XPUB   = os.getenv("PROXY_XPUB", "tcp://localhost:5558")   # proxy (XPUB)
+# --- Configuração ZMQ ---
+context = zmq.Context()
 
-USERNAME = os.getenv("USERNAME", f"user{random.randint(1000,9999)}")  # nome do usuário
-AUTO = os.getenv("AUTO_CLIENT", "0") == "1"                           # cliente automático?
+# Socket REQ (para enviar comandos)
+req_socket = context.socket(zmq.REQ)
+req_socket.connect(f"tcp://{req_address}:{req_port}")
 
-logical_clock = 0  # relógio lógico local (Lamport)
+# Socket SUB (para receber mensagens)
+sub_socket = context.socket(zmq.SUB)
+sub_socket.connect(f"tcp://{sub_address}:{sub_port}")
 
+# Trava para proteger o socket REQ (REQ é síncrono)
+req_lock = threading.Lock()
 
-def ts() -> str:
-    """Timestamp físico simples."""
-    return datetime.utcnow().isoformat() + "Z"
+# --- Thread Receptora (PUB/SUB) ---
 
+def receiver_thread(username):
+    """Thread que escuta mensagens do sub_socket."""
+    print(f"\n[Receptor] Inscrito no tópico: {username}")
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, username)
+    
+    while True:
+        try:
+            # Espera por uma mensagem (tópico + dados)
+            [topic, data] = sub_socket.recv_multipart()
+            
+            message = json.loads(data.decode('utf-8'))
+            topic = topic.decode('utf-8')
+            
+            dt = datetime.fromtimestamp(message['timestamp']).strftime('%H:%M:%S')
+            
+            # Limpa a linha de input atual para imprimir a mensagem
+            print("\r" + " " * 80 + "\r", end='')
+            
+            if message.get('type') == 'channel':
+                print(f"[{dt}][Canal: {topic}] {message['user']}: {message['message']}")
+            elif message.get('type') == 'private':
+                print(f"[{dt}][Privado de: {message['from']}]: {message['message']}")
+            
+            # Redesenha o prompt de input
+            print("Escolha uma opção: ", end='', flush=True)
 
-def update_clock(remote_clock: int) -> None:
-    """Atualiza relógio lógico com base em outro clock."""
-    global logical_clock
-    logical_clock = max(logical_clock, int(remote_clock or 0)) + 1
+        except (zmq.ZMQError, Exception) as e:
+            print(f"\n[Receptor] Erro: {e}. Encerrando thread.")
+            break
 
+# --- Funções Auxiliares ---
 
-def next_clock() -> int:
-    """Incrementa o relógio lógico e devolve valor atual."""
-    global logical_clock
-    logical_clock += 1
-    return logical_clock
+def send_request(service, data):
+    """Função genérica para enviar uma requisição e receber uma resposta."""
+    request_data = {
+        "service": service,
+        "data": data
+    }
+    
+    # O socket REQ não é thread-safe, usamos uma trava
+    with req_lock:
+        try:
+            req_socket.send_json(request_data)
+            response = req_socket.recv_json()
+        except zmq.ZMQError as e:
+            print(f"Erro de comunicação com o broker: {e}")
+            return {"data": {"status": "erro", "description": "Falha no broker"}}
+            
+    print(f"\n[Resposta do Servidor]: {response.get('data')}")
+    return response.get('data', {})
 
+def main_menu(username):
+    """Loop principal do menu do cliente."""
+    print("\n--- Menu Principal ---")
+    print("1. Listar usuários")
+    print("2. Criar canal")
+    print("3. Listar canais")
+    print("4. Enviar Mensagem (Canal)")
+    print("5. Enviar Mensagem (Usuário)")
+    print("6. Inscrever-se em Canal")
+    print("q. Sair")
+    
+    while True:
+        choice = input("Escolha uma opção: ").strip()
 
-def send_req(sock, service: str, data: dict) -> dict:
-    """
-    Envia requisição em MessagePack para o servidor,
-    já incluindo timestamp e clock.
-    """
-    # incrementa clock antes de enviar
-    data = dict(data or {})
-    data.setdefault("timestamp", ts())
-    data.setdefault("clock", next_clock())
+        if choice == '1':
+            send_request("users", {"timestamp": int(time.time())})
+        
+        elif choice == '2':
+            channel_name = input("  Nome do novo canal: ").strip()
+            if channel_name:
+                send_request("channel", {"channel": channel_name, "timestamp": int(time.time())})
+        
+        elif choice == '3':
+            send_request("channels", {"timestamp": int(time.time())})
 
-    payload = {"service": service, "data": data}
-    sock.send(msgpack.packb(payload, use_bin_type=True))
+        elif choice == '4': # Publish
+            channel_name = input("  Nome do canal: ").strip()
+            message = input("  Mensagem: ").strip()
+            if channel_name and message:
+                send_request("publish", {
+                    "user": username,
+                    "channel": channel_name,
+                    "message": message,
+                    "timestamp": int(time.time())
+                })
+        
+        elif choice == '5': # Message
+            dst_user = input("  Nome do usuário de destino: ").strip()
+            message = input("  Mensagem: ").strip()
+            if dst_user and message:
+                send_request("message", {
+                    "src": username,
+                    "dst": dst_user,
+                    "message": message,
+                    "timestamp": int(time.time())
+                })
+        
+        elif choice == '6': # Subscribe
+            channel_name = input("  Nome do canal para inscrever-se: ").strip()
+            if channel_name:
+                sub_socket.setsockopt_string(zmq.SUBSCRIBE, channel_name)
+                print(f"[Cliente] Inscrito no canal: {channel_name}")
 
-    # recebe resposta e atualiza clock com o clock recebido
-    rep_raw = sock.recv()
-    reply = msgpack.unpackb(rep_raw, raw=False)
-    rdata = reply.get("data", {}) or {}
-    update_clock(rdata.get("clock", 0))
-    return reply
+        elif choice.lower() == 'q':
+            print("Saindo...")
+            break
+        
+        else:
+            print("Opção inválida.")
 
-
-def main():
-    ctx = zmq.Context()
-
-    # REQ para falar com o servidor via broker
-    req = ctx.socket(zmq.REQ)
-    req.connect(BROKER)
-
-    # SUB para receber mensagens do proxy
-    sub = ctx.socket(zmq.SUB)
-    sub.connect(XPUB)
-
-    # registra usuário no servidor
-    send_req(req, "register_user", {"user": USERNAME})
-
-    # obtém lista de canais
-    ch_resp = send_req(req, "list_channels", {})
-    channels = (ch_resp.get("data", {}) or {}).get("channels", []) or ["general"]
-
-    # assina o próprio nome (mensagens diretas) e todos os canais
-    sub.setsockopt_string(zmq.SUBSCRIBE, USERNAME)
-    for ch in channels:
-        sub.setsockopt_string(zmq.SUBSCRIBE, ch)
-
-    print(f"[{USERNAME}] assinando {USERNAME} + {channels}")
-
-    poller = zmq.Poller()
-    poller.register(sub, zmq.POLLIN)
-
-    if AUTO:
-        # modo automático: manda 10 mensagens por vez em canais aleatórios
-        while True:
-            canal = random.choice(channels)
-            for i in range(10):
-                send_req(
-                    req,
-                    "publish",
-                    {
-                        "user": USERNAME,
-                        "channel": canal,
-                        "message": f"auto-msg {i} de {USERNAME} em #{canal}",
-                    },
-                )
-                time.sleep(0.05)
-
-            # vê se chegaram publicações enquanto isso
-            socks = dict(poller.poll(50))
-            if socks.get(sub) == zmq.POLLIN:
-                topic, raw = sub.recv_multipart()
-                try:
-                    payload = msgpack.unpackb(raw, raw=False)
-                    # atualiza relógio com clock da msg recebida
-                    update_clock(payload.get("clock", 0))
-                    print(f"[{USERNAME}] <- ({topic.decode()}) {payload}")
-                except Exception:
-                    pass
-    else:
-        # modo "somente ouvindo"
-        while True:
-            topic, raw = sub.recv_multipart()
-            try:
-                payload = msgpack.unpackb(raw, raw=False)
-                update_clock(payload.get("clock", 0))
-                print(f"[{USERNAME}] <- ({topic.decode()}) {payload}")
-            except Exception:
-                pass
-
-
+# --- Ponto de Entrada ---
 if __name__ == "__main__":
-    main()
+    print("Cliente iniciado.")
+    username = ""
+    while not username:
+        username = input("Digite seu nome de usuário para login: ").strip()
+
+    # 1. Realizar Login (Obrigatório)
+    login_data = {
+        "user": username,
+        "timestamp": int(time.time())
+    }
+    login_response = send_request("login", login_data)
+    
+    if login_response.get("status") == "sucesso":
+        print(f"Login de '{username}' realizado com sucesso.")
+        
+        # 2. Iniciar a thread receptora
+        r_thread = threading.Thread(target=receiver_thread, args=(username,), daemon=True)
+        r_thread.start()
+        
+        # 3. Entrar no menu principal
+        main_menu(username)
+    else:
+        print(f"Falha no login: {login_response.get('description')}")
+        
+    print("Encerrando cliente.")
+    req_socket.close()
+    sub_socket.close()
+    context.term()
+    sys.exit(0)
